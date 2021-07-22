@@ -6,6 +6,7 @@
 #include <vector>
 #include <cstdlib>
 
+#include "Common/CPUDetect.h"
 #include "Common/Log.h"
 #include "Common/LogManager.h"
 #include "Common/System/Display.h"
@@ -17,8 +18,10 @@
 #include "Common/ConsoleListener.h"
 #include "Common/Input/InputState.h"
 #include "Common/Thread/ThreadUtil.h"
+#include "Common/Thread/ThreadManager.h"
 #include "Common/File/VFS/VFS.h"
 #include "Common/File/VFS/AssetReader.h"
+#include "Common/Data/Text/I18n.h"
 
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
@@ -345,6 +348,17 @@ static void check_variables(CoreParameter &coreParam)
    if (g_Config.iLanguage < 0)
       g_Config.iLanguage = get_language_auto();
 
+   g_Config.sLanguageIni = "en_US";
+   auto langValuesMapping = GetLangValuesMapping();
+   for (auto i = langValuesMapping.begin(); i != langValuesMapping.end(); ++i)
+   {
+      if (i->second.second == g_Config.iLanguage)
+      {
+         g_Config.sLanguageIni = i->first;
+      }
+   }
+   i18nrepo.LoadIni(g_Config.sLanguageIni);
+
    if (!PSP_IsInited() && ppsspp_internal_resolution.Update(&g_Config.iInternalResolution))
    {
       coreParam.pixelWidth  = coreParam.renderWidth  = g_Config.iInternalResolution * 480;
@@ -399,6 +413,8 @@ void retro_init(void)
    g_Config.iPSPModel = PSP_MODEL_SLIM;
 
    LogManager::Init(&g_Config.bEnableLogging);
+
+   g_threadManager.Init(cpu_info.num_cores, cpu_info.logical_cpu_count);
 
    host = new LibretroHost;
 
@@ -487,7 +503,7 @@ namespace Libretro
 
    static void EmuThreadFunc()
    {
-      setCurrentThreadName("Emu");
+      SetCurrentThreadName("Emu");
 
       for (;;)
       {
@@ -559,8 +575,8 @@ namespace Libretro
 
 bool retro_load_game(const struct retro_game_info *game)
 {
-   static std::string retro_base_dir;
-   static std::string retro_save_dir;
+   static Path retro_base_dir;
+   static Path retro_save_dir;
    std::string error_string;
    enum retro_pixel_format fmt          = RETRO_PIXEL_FORMAT_XRGB8888;
    const char *nickname                 = NULL;
@@ -600,43 +616,30 @@ bool retro_load_game(const struct retro_game_info *game)
    if (environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir_ptr) 
          && dir_ptr)
    {
-      size_t last;
-      retro_base_dir = dir_ptr;
-      // Make sure that we don't have any lingering slashes, etc, as they break Windows.
-      last = retro_base_dir.find_last_not_of(DIR_SEP_CHRS);
-      if (last != std::string::npos)
-         last++;
-
-      retro_base_dir = retro_base_dir.substr(0, last) + DIR_SEP;
+      retro_base_dir = Path(dir_ptr);
    }
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir_ptr) 
          && dir_ptr)
    {
-      retro_save_dir = dir_ptr;
-      // Make sure that we don't have any lingering slashes, etc, as they break Windows.
-      size_t last = retro_save_dir.find_last_not_of(DIR_SEP_CHRS);
-      if (last != std::string::npos)
-         last++;
-
-      retro_save_dir = retro_save_dir.substr(0, last) + DIR_SEP;
+      retro_save_dir = Path(dir_ptr);
    }
 
    if (retro_base_dir.empty())
-      retro_base_dir = File::GetDir(game->path);
+      retro_base_dir = Path(game->path).NavigateUp();
 
-   retro_base_dir            += "PPSSPP" DIR_SEP;
+   retro_base_dir /= "PPSSPP";
 
    if (retro_save_dir.empty())
-      retro_save_dir = File::GetDir(game->path);
+      retro_save_dir = Path(game->path).NavigateUp();
 
-   g_Config.currentDirectory      = retro_base_dir;
-   g_Config.externalDirectory     = retro_base_dir;
+   g_Config.currentDirectory = retro_base_dir;
+   g_Config.defaultCurrentDirectory = retro_base_dir;
    g_Config.memStickDirectory     = retro_save_dir;
-   g_Config.flash0Directory       = retro_base_dir + "flash0" DIR_SEP;
+   g_Config.flash0Directory       = retro_base_dir / "flash0";
    g_Config.internalDataDirectory = retro_base_dir;
 
-   VFSRegister("", new DirectoryAssetReader(retro_base_dir.c_str()));
+   VFSRegister("", new DirectoryAssetReader(retro_base_dir));
 
    coreState = CORE_POWERUP;
    ctx       = LibretroGraphicsContext::CreateGraphicsContext();
@@ -649,8 +652,8 @@ bool retro_load_game(const struct retro_game_info *game)
 
    CoreParameter coreParam   = {};
    coreParam.enableSound     = true;
-   coreParam.fileToStart     = std::string(game->path);
-   coreParam.mountIso        = "";
+   coreParam.fileToStart     = Path(std::string(game->path));
+   coreParam.mountIso.clear();
    coreParam.startBreak      = false;
    coreParam.printfEmuLog    = true;
    coreParam.headLess        = true;
@@ -684,6 +687,8 @@ void retro_unload_game(void)
 	delete ctx;
 	ctx = nullptr;
 	PSP_CoreParameter().graphicsContext = nullptr;
+
+   g_threadManager.Teardown();
 }
 
 void retro_reset(void)
@@ -759,10 +764,12 @@ static void retro_input(void)
       }
    }
 
-   __CtrlSetAnalogX(input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X) / 32768.0f, CTRL_STICK_LEFT);
-   __CtrlSetAnalogY(input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y) / -32768.0f, CTRL_STICK_LEFT);
-   __CtrlSetAnalogX(input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X) / 32768.0f, CTRL_STICK_RIGHT);
-   __CtrlSetAnalogY(input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y) / -32768.0f, CTRL_STICK_RIGHT);
+   float x_left = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X) / 32767.0f;
+   float y_left = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y) / -32767.0f;
+   float x_right = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X) / 32767.0f;
+   float y_right = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y) / -32767.0f;
+   __CtrlSetAnalogXY(CTRL_STICK_LEFT, x_left, y_left);
+   __CtrlSetAnalogXY(CTRL_STICK_RIGHT, x_right, y_right);
 }
 
 void retro_run(void)

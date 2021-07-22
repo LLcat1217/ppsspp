@@ -48,7 +48,6 @@ public:
 	size_t WriteFile(u32 handle, const u8 *pointer, s64 size) override;
 	size_t WriteFile(u32 handle, const u8 *pointer, s64 size, int &usec) override;
 
-	bool GetHostPath(const std::string &inpath, std::string &outpath) override {return false;}
 	bool MkDir(const std::string &dirname) override {return false;}
 	bool RmDir(const std::string &dirname) override { return false; }
 	int  RenameFile(const std::string &from, const std::string &to) override { return -1; }
@@ -56,21 +55,20 @@ public:
 
 private:
 	struct TreeEntry {
-		TreeEntry() : flags(0), valid(false) {}
 		~TreeEntry();
 
 		std::string name;
-		u32 flags;
-		u32 startingPosition;
-		s64 size;
-		bool isDirectory;
+		u32 flags = 0;
+		u32 startingPosition = 0;
+		s64 size = 0;
+		bool isDirectory = false;
 
-		u32 startsector;
-		u32 dirsize;
+		u32 startsector = 0;
+		u32 dirsize = 0;
 
-		TreeEntry *parent;
+		TreeEntry *parent = nullptr;
 
-		bool valid;
+		bool valid = false;
 		std::vector<TreeEntry *> children;
 	};
 
@@ -146,7 +144,6 @@ public:
 	size_t WriteFile(u32 handle, const u8 *pointer, s64 size, int &usec) override {
 		return isoFileSystem_->WriteFile(handle, pointer, size, usec);
 	}
-	bool GetHostPath(const std::string &inpath, std::string &outpath) override { return false; }
 	bool MkDir(const std::string &dirname) override { return false; }
 	bool RmDir(const std::string &dirname) override { return false; }
 	int  RenameFile(const std::string &from, const std::string &to) override { return -1; }
